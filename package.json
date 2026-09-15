@@ -1,0 +1,28 @@
+{
+  "name": "copilot-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server that lets Claude Code delegate to GitHub Copilot CLI as a persistent second agent",
+  "type": "module",
+  "bin": {
+    "copilot-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}
