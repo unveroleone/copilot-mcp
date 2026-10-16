@@ -7,10 +7,11 @@ so a later call can reference earlier findings without resending context.
 ## How it works
 
 The bridge spawns `copilot -p` with `--output-format json` and parses the JSONL event stream.
-On the first call for a session name it starts a new Copilot session, reads the session UUID
-from the stream's `result` event, and stores the mapping in `~/.copilot-mcp/sessions.json`.
-Every later call for the same name passes that UUID back via `--session-id`, which resumes the
-conversation with its full history.
+On the first call for a session name the bridge generates a UUID and passes it via
+`--session-id`, which makes Copilot create the session under that id. The mapping is stored in
+`~/.copilot-mcp/sessions.json`. Every later call for the same name passes the UUID again, which
+resumes the conversation with its full history. Because the id is assigned up front, a session
+whose first turn timed out can still be resumed.
 
 Claude's own context is not shared with Copilot and vice versa. The bridge only passes the
 prompt and returns the final Copilot response.
@@ -18,23 +19,28 @@ prompt and returns the final Copilot response.
 ## Requirements
 
 - Node.js 20 or newer, pnpm
-- GitHub Copilot CLI 1.0.73 or newer, authenticated (`copilot login`)
-- Verified against Copilot CLI 1.0.73
+- GitHub Copilot CLI 1.0.73 or newer (`npm install -g @github/copilot`), authenticated
+  (`copilot login`), with CLI access enabled for the account at
+  https://github.com/settings/copilot
+- Verified against Copilot CLI 1.0.73 and 1.0.98
 
 ## Installation
 
 ```bash
-cd ~/projects/private/copilot-mcp
+git clone https://github.com/unveroleone/copilot-mcp && cd copilot-mcp
 pnpm install
 pnpm build
 
-claude mcp add copilot -- pnpm -C "$PWD" exec tsx src/index.ts
+claude mcp add copilot -s user -- node "$PWD/dist/index.js"
 ```
 
 Restart Claude Code or run `/mcp` to reconnect. The `copilot` MCP server then shows up in
 `/context` alongside the other servers.
 
-Run `claude mcp remove copilot` to unregister.
+Run `claude mcp remove copilot -s user` to unregister.
+
+Set `COPILOT_MCP_BIN` in the server's environment to use a `copilot` binary that is not on
+`PATH`.
 
 ## Tools
 
@@ -51,25 +57,37 @@ Sends a prompt to a named Copilot session.
 | `timeoutMs` | no | Timeout in milliseconds, default 300000 |
 | `allowTools` | no | Tools granted without confirmation, e.g. `["write"]` or `["shell(git:*)"]`. Omit for read-only |
 | `effort` | no | Reasoning effort: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` |
+| `denyTools` | no | Tools to deny outright, e.g. `["shell(git push)"]`. Takes precedence over `allowTools` |
+| `addDirs` | no | Extra absolute directories the session may access |
+| `attachments` | no | Absolute paths of images or documents to attach to the prompt |
+| `maxAiCredits` | no | Cap on AI credits Copilot may spend on the turn |
 
 Without `allowTools` the session cannot modify files or run arbitrary commands. That default
 matches the reviewer use case. Grant tools explicitly when the session should act on the code.
 
-Sessions are bound to one working directory. Calling a session with a different `workdir`
+Sessions are bound to one working directory. `workdir` must be an absolute path to an existing
+directory; symlinks are resolved before comparing. Calling a session with a different `workdir`
 returns an error; use a new session name or forget the old one.
 
-Copilot sessions are single-writer. Do not run two prompts on the same session at the same time.
+Copilot sessions are single-writer. A call on a session that already has a turn running is
+rejected; different session names run in parallel.
+
+Copilot runs with `--no-ask-user`, since nobody can answer a question in non-interactive mode.
+While a turn runs, the bridge sends MCP progress notifications for tool calls and messages.
+Cancelling the tool call, a timeout, or the client disconnecting kills the whole Copilot process
+tree. The response ends with the files Copilot modified and the premium requests it used.
 
 ### list_copilot_models
 
 Lists the models Claude can pick from:
 
 - custom models from `~/.copilot-mcp/models.json`
-- Copilot's persisted default model from `~/.copilot/settings.json`
+- Copilot's default model (`COPILOT_MODEL`, else `$COPILOT_HOME/settings.json`)
 - the built-in model catalog of the installed Copilot CLI
 
-The built-in catalog is read from the installed Copilot bundle at runtime, so it matches the
-CLI version on the machine. Plan limits still apply; if Copilot reports a model as unavailable,
+The built-in catalog is read from `copilot help config` at runtime and cached per CLI version,
+so it matches the CLI on the machine. Older CLIs that ship a JS bundle are read from `app.js`;
+if neither works, a static list is used and the output says so. Plan limits still apply; if Copilot reports a model as unavailable,
 pick a different one. Use a listed name as the `model` argument of `delegate_to_copilot`.
 
 ### list_copilot_sessions
@@ -107,7 +125,10 @@ configured in `~/.copilot-mcp/models.json`:
 
 When the `model` argument matches a custom model name, the bridge injects its env vars into
 that one Copilot process. BYOK mode is per process, so GitHub models and custom providers do
-not interfere with each other. The file contains API keys; set its permissions accordingly:
+not interfere with each other. Env vars whose names contain `KEY`, `TOKEN`, `SECRET`, `PASSWORD`
+or `HEADERS` are passed to `--secret-env-vars`, so Copilot strips them from its shell and MCP
+subprocesses and redacts them from output. The file contains API keys; set its permissions
+accordingly:
 
 ```bash
 chmod 600 ~/.copilot-mcp/models.json
@@ -142,4 +163,5 @@ catalog.
 pnpm dev        # run via tsx
 pnpm typecheck  # tsc --noEmit
 pnpm build      # compile to dist/
+pnpm test       # end-to-end tests against a fake copilot binary
 ```
