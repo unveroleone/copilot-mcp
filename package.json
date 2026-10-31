@@ -2,7 +2,26 @@
   "name": "copilot-mcp",
   "version": "0.2.0",
   "private": true,
-  "description": "MCP server that lets Claude Code delegate to GitHub Copilot CLI as a persistent second agent",
+  "description": "MCP server that lets your coding agent (Claude Code, OpenCode, Codex and others) delegate prompts to the GitHub Copilot CLI for a second opinion. Named sessions keep their history across calls, Copilot runs read-only by default, and you can pick models or plug in your own provider.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/unveroleone/copilot-mcp.git"
+  },
+  "homepage": "https://github.com/unveroleone/copilot-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/unveroleone/copilot-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "claude-code",
+    "opencode",
+    "codex",
+    "github-copilot",
+    "copilot-cli",
+    "code-review"
+  ],
   "type": "module",
   "bin": {
     "copilot-mcp": "dist/index.js"
