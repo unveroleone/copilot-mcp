@@ -130,6 +130,7 @@ and the final answer comes out.
 | `list_copilot_models` | List the models Claude can pick from, with your own notes |
 | `list_copilot_sessions` | List tracked sessions with id prefix, working directory, model and turn count |
 | `forget_copilot_session` | Drop a session so the next call with that name starts fresh |
+| `record_review_triage` | Record what the calling agent decided about a review's findings |
 
 ### delegate_to_copilot
 
@@ -146,6 +147,10 @@ and the final answer comes out.
 | `addDirs` | no | Extra absolute directories the session may access |
 | `attachments` | no | Absolute paths of images or documents to attach to the prompt |
 | `maxAiCredits` | no | Cap on AI credits Copilot may spend on the turn |
+| `reviewKind` | no | What the call reviews: `code`, `plan` or `other`. Stored in the review ledger |
+| `episode` | no | Stable id for the change under review, shared by its retries and later passes |
+| `pass` | no | `initial`, `revision`, `verification` or `retry` |
+| `author` | no | Model that wrote the reviewed work, or `mixed` or `unknown`. Stored as caller-declared |
 
 Behavior worth knowing:
 
@@ -160,7 +165,18 @@ Behavior worth knowing:
 - While a turn runs, the server sends MCP progress notifications for tool calls and messages.
 - Cancelling the tool call, a timeout, or a client disconnect kills the whole Copilot process
   tree.
-- The response ends with the files Copilot modified and the premium requests it used.
+- The response ends with the files Copilot modified, the premium requests it used and the review
+  attempt id.
+
+### record_review_triage
+
+Stores the calling agent's decision on each finding, keyed by the attempt id from
+`delegate_to_copilot`. A finding is `accepted`, `rejected`, `deferred` or `unknown`. An empty
+`findings` list means a clean review. Plan reviews can also pass `planBefore`, `planAfter` and
+`decisionsChanged`.
+
+The record is labeled as the implementing agent's opinion. It says what the agent chose to do,
+not whether the finding was correct.
 
 ### list_copilot_models
 
@@ -185,6 +201,25 @@ turn count.
 Removes a session from the server's tracking. The next delegation with the same name starts a
 fresh Copilot session. Copilot's own session files on disk are left alone; only the mapping in
 `~/.copilot-mcp/sessions.json` is removed.
+
+## Review ledger
+
+Every `delegate_to_copilot` call is logged locally under `~/.copilot-mcp/ledger/attempts/<id>/`,
+so you can measure what reviews find. Nothing leaves your machine.
+
+| File | Contents |
+| --- | --- |
+| `start.json` | Written before Copilot launches: session, client, requested model and review target |
+| `end.json` | Outcome, duration, observed model and reported usage. Missing means the run was interrupted |
+| `prompt.txt` | The prompt |
+| `response.txt`, `final.txt` | All assistant messages, and the last one on its own |
+| `target.patch` | Uncommitted changes and small untracked text files at the start of the run |
+| `triage-*.json` | Records from `record_review_triage` |
+
+The directory is readable only by your user. Secrets that match common token formats are redacted,
+and `.env`, `.pem` and `.key` files are left out of the patch. Redaction is best effort, so treat
+the ledger as private. If the ledger cannot write, the review still runs and the response carries a
+warning.
 
 ## Configuration
 
