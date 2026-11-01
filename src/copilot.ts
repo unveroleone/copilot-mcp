@@ -28,7 +28,10 @@ export interface CopilotCallOptions {
 }
 
 export interface CopilotCallResult {
+  // Every assistant message of the turn, joined. Can include preliminary statements.
   text: string;
+  // Only the last assistant message, which is normally the actual answer.
+  finalText: string;
   sessionId: string;
   model: string | null;
   exitCode: number | null;
@@ -37,6 +40,9 @@ export interface CopilotCallResult {
   stderr: string;
   filesModified: string[];
   premiumRequests: number;
+  // False when Copilot sent no usage figure, so premiumRequests is a default, not a measurement.
+  premiumRequestsReported: boolean;
+  sessionError: { type: string; message: string } | null;
 }
 
 export const DEFAULT_TIMEOUT_MS = 300_000;
@@ -119,6 +125,7 @@ export function callCopilot(opts: CopilotCallOptions): Promise<CopilotCallResult
     const messages: string[] = [];
     let model: string | null = null;
     let resultEvent: Record<string, unknown> | null = null;
+    let sessionError: { type: string; message: string } | null = null;
     let stderr = "";
     let timedOut = false;
     let aborted = false;
@@ -158,6 +165,12 @@ export function callCopilot(opts: CopilotCallOptions): Promise<CopilotCallResult
         }
       } else if (event.type === "result") {
         resultEvent = event;
+      } else if (event.type === "session.error") {
+        const data = (event.data ?? {}) as Record<string, unknown>;
+        sessionError = {
+          type: String(data.errorType ?? "unknown"),
+          message: String(data.message ?? "").slice(0, 2000),
+        };
       }
       const progress = opts.onProgress && describeEvent(event);
       if (progress) opts.onProgress!(progress);
@@ -190,6 +203,7 @@ export function callCopilot(opts: CopilotCallOptions): Promise<CopilotCallResult
       const codeChanges = (usage.codeChanges ?? {}) as Record<string, unknown>;
       resolve({
         text: messages.join("\n\n").trim(),
+        finalText: messages.at(-1)?.trim() ?? "",
         sessionId: (resultEvent?.sessionId as string | undefined) ?? sessionId,
         model,
         exitCode: code,
@@ -200,6 +214,8 @@ export function callCopilot(opts: CopilotCallOptions): Promise<CopilotCallResult
           ? (codeChanges.filesModified as string[])
           : [],
         premiumRequests: typeof usage.premiumRequests === "number" ? usage.premiumRequests : 0,
+        premiumRequestsReported: typeof usage.premiumRequests === "number",
+        sessionError,
       });
     });
   });

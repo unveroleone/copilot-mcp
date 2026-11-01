@@ -12,6 +12,7 @@ import {
   loadAnnotations,
   loadCustomModels,
 } from "./models.js";
+import { beginAttempt, recordTriage } from "./ledger.js";
 import { getSession, listSessions, putSession, removeSession } from "./store.js";
 
 const server = new McpServer({
@@ -110,13 +111,37 @@ server.registerTool(
         .positive()
         .optional()
         .describe("Cap on AI credits Copilot may spend on this turn."),
+      reviewKind: z
+        .enum(["code", "plan", "other"])
+        .optional()
+        .describe("What this call reviews. Recorded in the local review ledger."),
+      episode: z
+        .string()
+        .max(200)
+        .optional()
+        .describe(
+          'Stable id for the change under review, shared by its retries and later passes, e.g. "task-087-phase-2".',
+        ),
+      pass: z
+        .enum(["initial", "revision", "verification", "retry"])
+        .optional()
+        .describe(
+          "Where this call sits in the episode: first review, review of a changed revision, confirming fixes, or repeating a failed attempt.",
+        ),
+      author: z
+        .string()
+        .max(100)
+        .optional()
+        .describe(
+          'Model that wrote the work under review, or "mixed" or "unknown". Leave out rather than guess.',
+        ),
     },
     annotations: { openWorldHint: true },
   },
   async (
     {
       session, prompt, model, workdir, timeoutMs, allowTools, effort, denyTools, addDirs,
-      attachments, maxAiCredits,
+      attachments, maxAiCredits, reviewKind, episode, pass, author,
     },
     extra,
   ) => {
@@ -151,24 +176,53 @@ server.registerTool(
           };
 
     busy.add(session);
+    let attempt;
     let result;
     try {
-      result = await callCopilot({
-        prompt,
+      attempt = await beginAttempt({
+        session,
         workdir: dir,
-        sessionId: existing?.copilotSessionId,
-        model,
-        effort,
-        allowTools,
-        denyTools,
-        addDirs,
-        attachments,
-        maxAiCredits,
-        timeoutMs,
-        extraEnv: model ? getCustomModel(model)?.env : undefined,
-        signal: extra.signal,
-        onProgress,
+        client: server.server.getClientVersion() ?? null,
+        priorTurns: existing?.turnCount ?? 0,
+        copilotSessionId: existing?.copilotSessionId ?? null,
+        prompt,
+        requestedModel: model ?? null,
+        effort: effort ?? null,
+        timeoutMs: timeoutMs ?? null,
+        allowTools: allowTools ?? [],
+        addDirs: addDirs ?? [],
+        attachments: attachments ?? [],
+        reviewKind: reviewKind ?? null,
+        episode: episode ?? null,
+        pass: pass ?? null,
+        author: author ?? null,
       });
+      try {
+        result = await callCopilot({
+          prompt,
+          workdir: dir,
+          sessionId: existing?.copilotSessionId,
+          model,
+          effort,
+          allowTools,
+          denyTools,
+          addDirs,
+          attachments,
+          maxAiCredits,
+          timeoutMs,
+          extraEnv: model ? getCustomModel(model)?.env : undefined,
+          signal: extra.signal,
+          onProgress,
+        });
+      } catch (err) {
+        attempt.fail(err);
+        if (attempt.warning && err instanceof Error) {
+          err.message += `\n(warning: ${attempt.warning})`;
+        }
+        throw err;
+      }
+      // Before anything below can throw, so failed starts stay on record.
+      await attempt.finish(result);
     } finally {
       busy.delete(session);
     }
@@ -177,7 +231,15 @@ server.registerTool(
     // policy); do not record it.
     const started = result.exitCode === 0 || result.text !== "" || result.timedOut;
     if (!started) {
-      const detail = result.stderr ? `\nstderr: ${result.stderr.slice(0, 2000)}` : "";
+      const detail = [
+        result.stderr ? `stderr: ${result.stderr.slice(0, 2000)}` : "",
+        result.sessionError ? `session error: ${result.sessionError.message}` : "",
+        attempt.id ? `(review attempt: ${attempt.id})` : "",
+        attempt.warning ? `(warning: ${attempt.warning})` : "",
+      ]
+        .filter(Boolean)
+        .map((line) => `\n${line}`)
+        .join("");
       throw new Error(`Copilot exited with code ${result.exitCode}.${detail}`);
     }
 
@@ -211,14 +273,82 @@ server.registerTool(
       const detail = result.stderr ? `\nstderr: ${result.stderr.slice(0, 2000)}` : "";
       parts.push(`\n(warning: exit code ${result.exitCode})${detail}`);
     }
+    if (result.sessionError) {
+      // Copilot can report an error and still exit 0; that must not read as a clean review.
+      parts.push(`\n(warning: Copilot session error: ${result.sessionError.message})`);
+    }
     if (result.filesModified.length > 0) {
       parts.push(`\n(files modified: ${result.filesModified.join(", ")})`);
     }
     if (result.premiumRequests > 0) {
       parts.push(`\n(premium requests: ${result.premiumRequests})`);
     }
+    if (attempt.id) {
+      parts.push(`\n(review attempt: ${attempt.id})`);
+    }
+    if (attempt.warning) {
+      parts.push(`\n(warning: ${attempt.warning})`);
+    }
 
     return { content: [{ type: "text" as const, text: parts.join("\n") }] };
+  },
+);
+
+server.registerTool(
+  "record_review_triage",
+  {
+    title: "Record Review Triage",
+    description:
+      "Record what you decided about a completed review, using the attempt id from the " +
+      "delegate_to_copilot response. List every finding with your honest disposition; pass an " +
+      "empty findings list for a clean review. This is stored as your opinion, not as proof " +
+      "that a finding was right or wrong. Disposition is what you chose to do, so a real " +
+      "problem you decided not to fix is still deferred or rejected. Do not call it for failed " +
+      "or empty attempts. For plan reviews, include the plan before and after, plus the " +
+      "decisions that changed.",
+    inputSchema: {
+      attemptId: z.uuid(),
+      findings: z.array(
+        z.object({
+          claim: z.string().min(1).max(2000).describe("The finding, close to the reviewer's words."),
+          reviewerSeverity: z
+            .string()
+            .max(50)
+            .optional()
+            .describe("The severity label the reviewer used, unchanged. Leave out if it gave none."),
+          disposition: z.enum(["accepted", "rejected", "deferred", "unknown"]),
+          note: z.string().max(2000).optional().describe("Why, in one or two sentences."),
+        }),
+      ),
+      decisionsChanged: z
+        .array(z.string().min(1).max(2000))
+        .optional()
+        .describe("Plan reviews: each decision that changed because of the review."),
+      planBefore: z.string().optional().describe("Plan reviews: the plan as it was reviewed."),
+      planAfter: z.string().optional().describe("Plan reviews: the plan after the review."),
+      note: z.string().max(4000).optional(),
+    },
+    annotations: { idempotentHint: false },
+  },
+  async ({ attemptId, findings, decisionsChanged, planBefore, planAfter, note }) => {
+    const recorded = recordTriage({
+      attemptId,
+      findings,
+      decisionsChanged,
+      planBefore,
+      planAfter,
+      note,
+      client: server.server.getClientVersion() ?? null,
+    });
+    if (!recorded) throw new Error(`Review attempt ${attemptId} is not in the ledger.`);
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Triage recorded for attempt ${attemptId}: ${findings.length} finding(s).`,
+        },
+      ],
+    };
   },
 );
 
